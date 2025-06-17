@@ -6,30 +6,43 @@ import { hasRealOpenAIKey } from './openai'
 /**
  * parseDueDate
  * ------------
- * • If an OpenAI API key is present, sends the raw hint to GPT and
- *   expects back a single ISO8601 date string (or “unknown”).  
- * • If no key—or if the model replies “unknown”—returns undefined.
+ * Uses OpenAI to convert a natural‑language due‑date hint into an ISO8601 date string,
+ * interpreting it relative to the entry’s `created_at` timestamp.
+ *
+ * @param raw     A free‑form due‑date hint (e.g. "tomorrow", "next Friday at 3pm").
+ * @param baseIso The ISO8601 timestamp of the entry’s creation
+ *                (e.g. "2025-06-17T12:34:56.000Z").
+ * @returns       An ISO8601 date string for the parsed due date, or `undefined`
+ *                if no hint was provided or parsing failed.
  */
-export async function parseDueDate(raw?: string): Promise<string | undefined> {
-  // If there’s no hint or no API key, bail out immediately
+export async function parseDueDate(
+  raw?: string,
+  baseIso?: string
+): Promise<string | undefined> {
+  // If there's no hint or no API key, we can't parse
   if (!raw || !hasRealOpenAIKey()) {
     return undefined
   }
 
-  // Dynamically import the OpenAI SDK only when we actually need it
-  const { default: OpenAI } = (await import('openai')) as { default: typeof OpenAIClient }
+  // Dynamically import the OpenAI SDK
+  const { default: OpenAI } = (await import('openai')) as {
+    default: typeof OpenAIClient
+  }
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 
-  // Instruct GPT to output exactly one ISO8601 date, or the word "unknown"
+  // System prompt: instruct GPT to use the provided reference date
   const system = `
-You are a date parsing assistant. 
-Given a user‑provided date hint (e.g. "tomorrow", "next Friday", "on June 20"), 
-respond with a single ISO8601 date string (e.g. "2025-06-20T00:00:00.000Z"). 
-If you cannot parse it, respond with exactly "unknown".
+You are a date parsing assistant. You will be given:
+  • a "due phrase", e.g. "${raw}"
+  • a "reference date" (the entry’s created_at): "${baseIso}"
+Interpret the due phrase relative to the reference date and output exactly one ISO8601 date string (e.g. "2025-06-18T15:00:00.000Z"). 
+If you cannot parse it, respond with exactly "unknown". Respond with the date only, no extra text.
 `.trim()
 
-  const user = `Date hint: "${raw}"`
+  // User message includes the phrase to parse
+  const user = `Due phrase: "${raw}"`
 
+  // Call the OpenAI chat completion endpoint
   const resp = await client.chat.completions.create({
     model:       'gpt-4o-mini',
     messages: [
@@ -37,16 +50,17 @@ If you cannot parse it, respond with exactly "unknown".
       { role: 'user',   content: user   },
     ],
     temperature: 0.0,
-    max_tokens:  20,
+    max_tokens: 20,
     stream:      false,
   })
 
+  // Grab the model's reply
   const reply = resp.choices?.[0]?.message?.content?.trim() ?? 'unknown'
-  if (reply === 'unknown') {
+  if (reply.toLowerCase() === 'unknown') {
     return undefined
   }
 
-  // Validate it’s a real date
+  // Validate the ISO string
   const ms = Date.parse(reply)
   if (isNaN(ms)) {
     return undefined
